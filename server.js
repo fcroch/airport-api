@@ -24,6 +24,17 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
+// Testador de Conexão Automático
+pool.getConnection()
+    .then(conn => {
+        console.log("✅ BANCO DE DADOS CONECTADO COM SUCESSO!");
+        conn.release();
+    })
+    .catch(err => {
+        console.error("❌ O SEGREDO DO ERRO É:");
+        console.error(err);
+    });
+
 // ==========================================
 // GERENCIAMENTO DE CLIENTES SSE
 // ==========================================
