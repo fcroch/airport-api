@@ -7,7 +7,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// CONFIGURAÇÃO DO BANCO DE DADOS (COM SEU IP CORRETO)
+// CONFIGURAÇÃO DO BANCO DE DADOS
 const dbConfig = {
     host: '82.112.247.235',
     user: 'u809350891_admin_user',
@@ -22,10 +22,12 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// Testador de Conexão
+// Testador e Migração Automática
 pool.getConnection()
     .then(conn => {
         console.log("✅ BANCO DE DADOS CONECTADO COM SUCESSO!");
+        // Cria a coluna de WhatsApp automaticamente se ela não existir
+        conn.execute('ALTER TABLE Users ADD COLUMN phone VARCHAR(20) DEFAULT NULL').catch(() => {});
         conn.release();
     })
     .catch(err => {
@@ -33,12 +35,34 @@ pool.getConnection()
     });
 
 // ==========================================
+// MÓDULO WEBHOOK WHATSAPP API
+// ==========================================
+async function sendWhatsAppAlert(phone, message) {
+    if (!phone) return;
+    
+    // Substitua pelo URL da sua API (Evolution API, Z-API, etc) e configure seus cabeçalhos/token
+    const API_URL = "URL_DA_SUA_API_AQUI"; 
+    
+    try {
+        console.log(`[ALERTA WHATSAPP] Enviando para ${phone}: ${message}`);
+        /* DESCOMENTE QUANDO TIVER A SUA API
+        await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ number: phone, text: message })
+        });
+        */
+    } catch (e) {
+        console.error("Erro ao disparar WhatsApp:", e.message);
+    }
+}
+
+// ==========================================
 // MÓDULO DE TEMPO REAL (SSE)
 // ==========================================
 const sseClients = new Map();
 
 function broadcastToSession(sessionId, eventType, data) {
-    // CORREÇÃO CRÍTICA DE TIPAGEM: Força o ID para String para não falhar na busca
     const id = String(sessionId); 
     if (sseClients.has(id)) {
         const clients = sseClients.get(id);
@@ -47,7 +71,6 @@ function broadcastToSession(sessionId, eventType, data) {
     }
 }
 
-// Iniciar conexão SSE do cliente
 app.get('/api/stream/:sessionId', (req, res) => {
     const sessionId = String(req.params.sessionId);
 
@@ -85,13 +108,14 @@ app.get('/api/stream/:sessionId', (req, res) => {
 
 // Criar nova sessão (Passageiro chega)
 app.post('/api/meetups', async (req, res) => {
-    let { passenger_id, flight_status, terminal, arrival_gate } = req.body;
+    let { passenger_id, flight_status, terminal, arrival_gate, phone } = req.body;
     const tracking_code = crypto.randomBytes(3).toString('hex').toUpperCase();
 
     try {
         if (!passenger_id) {
             const [userResult] = await pool.execute(
-                "INSERT INTO Users (name, role) VALUES ('Passageiro Anônimo', 'passenger')"
+                "INSERT INTO Users (name, role, phone) VALUES ('Passageiro Anônimo', 'passenger', ?)",
+                [phone || null]
             );
             passenger_id = userResult.insertId;
         }
@@ -117,7 +141,7 @@ app.post('/api/meetups', async (req, res) => {
 // Entrar na sessão (Motorista busca)
 app.patch('/api/meetups/:code/join', async (req, res) => {
     const { code } = req.params;
-    let { seeker_id } = req.body;
+    let { seeker_id, phone } = req.body;
 
     try {
         const [rows] = await pool.execute('SELECT * FROM MeetupSessions WHERE tracking_code = ? AND status = "active"', [code]);
@@ -127,7 +151,8 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
 
         if (!seeker_id) {
             const [userResult] = await pool.execute(
-                "INSERT INTO Users (name, role) VALUES ('Motorista Anônimo', 'seeker')"
+                "INSERT INTO Users (name, role, phone) VALUES ('Motorista Anônimo', 'seeker', ?)",
+                [phone || null]
             );
             seeker_id = userResult.insertId;
         }
@@ -143,7 +168,7 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
     }
 });
 
-// Atualizar Status (Passageiro clica no botão "Na esteira")
+// Atualizar Status (Passageiro clica nos botões)
 app.patch('/api/meetups/:code/status', async (req, res) => {
     const { code } = req.params;
     const { flight_status } = req.body;
@@ -159,8 +184,16 @@ app.patch('/api/meetups/:code/status', async (req, res) => {
             [flight_status, session_id]
         );
 
-        // DISPARA O EVENTO PARA O MOTORISTA VER A ATUALIZAÇÃO
+        // Dispara evento em tempo real
         broadcastToSession(session_id, 'status_update', { flight_status });
+
+        // GATILHO DE WHATSAPP:
+        if (flight_status === 'No Saguão' || flight_status === 'Desembarcando') {
+            const [seekerRows] = await pool.execute('SELECT u.phone FROM Users u JOIN MeetupSessions m ON m.seeker_id = u.id WHERE m.id = ?', [session_id]);
+            if (seekerRows.length > 0 && seekerRows[0].phone) {
+                sendWhatsAppAlert(seekerRows[0].phone, `⚠️ Alerta AeroMeet: O Passageiro do código [${code}] mudou o status para: ${flight_status}`);
+            }
+        }
 
         res.json({ message: 'Status atualizado' });
     } catch (error) {
@@ -178,7 +211,6 @@ app.post('/api/pings', async (req, res) => {
             [session_id, user_id, latitude, longitude]
         );
 
-        // DISPARA A POSIÇÃO GPS PARA O MOTORISTA VER NO MAPA
         broadcastToSession(session_id, 'location_update', { user_id, latitude, longitude });
 
         res.json({ success: true });
