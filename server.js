@@ -13,7 +13,7 @@ app.use(express.json());
 const dbConfig = {
     host: '82.25.72.31', // IP do seu servidor MySQL na Hostinger
     user: 'u809350891_admin_user',
-    password: 'SUA_SENHA_AQUI', // <-- Lembre-se de alterar para a senha real antes de subir!
+    password: 'KNTjHWDwRckXxq6', // <-- Lembre-se de alterar para a senha real antes de subir!
     database: 'u809350891_topclassexec'
 };
 
