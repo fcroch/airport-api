@@ -2,25 +2,21 @@ const express = require('express');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
 const cors = require('cors');
-
 const app = express();
 app.use(cors());
 app.use(express.json());
-
 const dbConfig = {
     host: '82.25.72.31',
     user: 'u809350891_admin_user',
     password: 'KNTjHWDwRckXxq6',
     database: 'u809350891_topclassexec'
 };
-
 const pool = mysql.createPool({
     ...dbConfig,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
 });
-
 // Testador de Conexão Automático
 pool.getConnection()
     .then(conn => {
@@ -31,9 +27,7 @@ pool.getConnection()
         console.error("❌ O SEGREDO DO ERRO É:");
         console.error(err);
     });
-
 const sseClients = new Map();
-
 function broadcastToSession(sessionId, eventType, data) {
     if (sseClients.has(sessionId)) {
         const clients = sseClients.get(sessionId);
@@ -41,11 +35,9 @@ function broadcastToSession(sessionId, eventType, data) {
         clients.forEach(client => client.write(payload));
     }
 }
-
 app.post('/api/meetups', async (req, res) => {
     let { passenger_id, flight_status, terminal, arrival_gate } = req.body;
     const tracking_code = crypto.randomBytes(3).toString('hex').toUpperCase();
-
     try {
         if (!passenger_id) {
             const [userResult] = await pool.execute(
@@ -53,14 +45,12 @@ app.post('/api/meetups', async (req, res) => {
             );
             passenger_id = userResult.insertId;
         }
-
         const [result] = await pool.execute(
             `INSERT INTO MeetupSessions 
             (tracking_code, passenger_id, flight_status, terminal, arrival_gate, status) 
             VALUES (?, ?, ?, ?, ?, 'active')`,
             [tracking_code, passenger_id, flight_status || 'Aterrissou', terminal || null, arrival_gate || null]
         );
-
         res.status(201).json({
             message: 'Sessão criada com sucesso',
             session_id: result.insertId,
@@ -72,7 +62,6 @@ app.post('/api/meetups', async (req, res) => {
         res.status(500).json({ error: 'Erro ao criar sessão' });
     }
 });
-
 app.get('/api/meetups/:trackingCode', async (req, res) => {
     const { trackingCode } = req.params;
     try {
@@ -86,7 +75,6 @@ app.get('/api/meetups/:trackingCode', async (req, res) => {
         res.status(500).json({ error: 'Erro ao buscar sessão' });
     }
 });
-
 app.patch('/api/meetups/:trackingCode/join', async (req, res) => {
     const { trackingCode } = req.params;
     try {
@@ -94,7 +82,6 @@ app.patch('/api/meetups/:trackingCode/join', async (req, res) => {
             "INSERT INTO Users (name, role) VALUES ('Buscador Anônimo', 'seeker')"
         );
         const seeker_id = userResult.insertId;
-
         const [result] = await pool.execute(
             'UPDATE MeetupSessions SET seeker_id = ? WHERE tracking_code = ? AND status = "active"',
             [seeker_id, trackingCode]
@@ -108,7 +95,6 @@ app.patch('/api/meetups/:trackingCode/join', async (req, res) => {
         res.status(500).json({ error: 'Erro ao ingressar' });
     }
 });
-
 app.patch('/api/meetups/:trackingCode/status', async (req, res) => {
     const { trackingCode } = req.params;
     const { flight_status } = req.body;
@@ -127,7 +113,6 @@ app.patch('/api/meetups/:trackingCode/status', async (req, res) => {
         res.status(500).json({ error: 'Erro interno' });
     }
 });
-
 app.post('/api/pings', async (req, res) => {
     const { session_id, user_id, latitude, longitude } = req.body;
     try {
@@ -141,7 +126,6 @@ app.post('/api/pings', async (req, res) => {
         res.status(500).json({ error: 'Erro ao salvar ping' });
     }
 });
-
 app.get('/api/stream/:sessionId', (req, res) => {
     const { sessionId } = req.params;
     
@@ -149,12 +133,10 @@ app.get('/api/stream/:sessionId', (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
-
     if (!sseClients.has(sessionId)) {
         sseClients.set(sessionId, []);
     }
     sseClients.get(sessionId).push(res);
-
     req.on('close', () => {
         const clients = sseClients.get(sessionId);
         if (clients) {
@@ -162,7 +144,6 @@ app.get('/api/stream/:sessionId', (req, res) => {
         }
     });
 });
-
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
