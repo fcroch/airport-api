@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 const dbConfig = {
-    host: '82.25.72.31',
+    host: '82.112.247.235',
     user: 'u809350891_admin_user',
     password: 'KNTjHWDwRckXxq6',
     database: 'u809350891_topclassexec'
