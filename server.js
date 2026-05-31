@@ -1,17 +1,19 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
-const cors = require('cors');
+const cors = require('cors'); // Necessário para a arquitetura separada
 
 const app = express();
-app.use(cors());
+app.use(cors()); // Permite que o seu domínio topclassexecutive.com.br converse com a Render
 app.use(express.json());
 
-// CONFIGURAÇÃO DO BANCO DE DADOS
+// A pasta public não será mais servida pelo Node, pois o frontend estará direto na Hostinger.
+
+// Configuração do Banco de Dados
 const dbConfig = {
-    host: '82.112.247.235',
+    host: '82.112.247.235', // IP do seu servidor MySQL na Hostinger
     user: 'u809350891_admin_user',
-    password: 'KNTjHWDwRckXxq6',
+    password: 'KNTjHWDwRckXxq6', // <-- Lembre-se de alterar para a senha real antes de subir!
     database: 'u809350891_topclassexec'
 };
 
@@ -22,120 +24,33 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// Testador e Migração Automática
+// Testador de Conexão Automático + Auto-Migração
 pool.getConnection()
     .then(conn => {
         console.log("✅ BANCO DE DADOS CONECTADO COM SUCESSO!");
-        // Cria a coluna de WhatsApp automaticamente se ela não existir
+        // Adiciona a coluna phone se não existir, de forma segura
         conn.execute('ALTER TABLE Users ADD COLUMN phone VARCHAR(20) DEFAULT NULL').catch(() => {});
         conn.release();
     })
     .catch(err => {
-        console.error("❌ ERRO NO BANCO:", err);
+        console.error("❌ O SEGREDO DO ERRO É:", err);
     });
 
 // ==========================================
-// MÓDULO WEBHOOK WHATSAPP API (EVOLUTION API)
-// ==========================================
-async function sendWhatsAppAlert(phone, message) {
-    if (!phone) return;
-    
-    // Configurações lidas do Painel da Render (Environment Variables)
-    const API_URL = process.env.EVOLUTION_API_URL;
-    const INSTANCE_NAME = process.env.EVOLUTION_INSTANCE;
-    const API_KEY = process.env.EVOLUTION_APIKEY;
-    
-    if (!API_URL || !INSTANCE_NAME || !API_KEY) {
-        console.log(`[ALERTA WHATSAPP] Simulado para ${phone} (Configure as variáveis EVOLUTION na Render): ${message}`);
-        return;
-    }
-
-    // Limpa o telefone para o padrão do WhatsApp (Apenas Números)
-    let cleanPhone = phone.replace(/\D/g, '');
-    
-    // Se o número tiver 10 ou 11 dígitos, provavelmente é brasileiro sem DDI
-    if (cleanPhone.length === 10 || cleanPhone.length === 11) {
-        cleanPhone = '55' + cleanPhone;
-    }
-
-    try {
-        console.log(`[ALERTA WHATSAPP] Disparando para ${cleanPhone} via Evolution API...`);
-        const response = await fetch(`${API_URL}/message/sendText/${INSTANCE_NAME}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'apikey': API_KEY
-            },
-            body: JSON.stringify({
-                number: cleanPhone,
-                options: {
-                    delay: 1200,
-                    presence: "composing"
-                },
-                textMessage: {
-                    text: message
-                }
-            })
-        });
-
-        if (response.ok) {
-            console.log("✅ WhatsApp disparado com sucesso!");
-        } else {
-            const data = await response.json();
-            console.error("❌ Erro retornado pela Evolution API:", data);
-        }
-    } catch (e) {
-        console.error("❌ Erro fatal de conexão com a Evolution API:", e.message);
-    }
-}
-
-// ==========================================
-// MÓDULO DE TEMPO REAL (SSE)
+// GERENCIAMENTO DE CLIENTES SSE
 // ==========================================
 const sseClients = new Map();
 
 function broadcastToSession(sessionId, eventType, data) {
-    const id = String(sessionId); 
-    if (sseClients.has(id)) {
-        const clients = sseClients.get(id);
+    if (sseClients.has(sessionId)) {
+        const clients = sseClients.get(sessionId);
         const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
         clients.forEach(client => client.write(payload));
     }
 }
 
-app.get('/api/stream/:sessionId', (req, res) => {
-    const sessionId = String(req.params.sessionId);
-
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*'
-    });
-
-    if (!sseClients.has(sessionId)) {
-        sseClients.set(sessionId, new Set());
-    }
-    
-    sseClients.get(sessionId).add(res);
-
-    const keepAlive = setInterval(() => {
-        res.write(': keepalive\n\n');
-    }, 15000);
-
-    req.on('close', () => {
-        clearInterval(keepAlive);
-        if (sseClients.has(sessionId)) {
-            sseClients.get(sessionId).delete(res);
-            if (sseClients.get(sessionId).size === 0) {
-                sseClients.delete(sessionId);
-            }
-        }
-    });
-});
-
 // ==========================================
-// ROTAS DA API
+// ROTAS PARA MEETUP SESSIONS
 // ==========================================
 
 // Criar nova sessão (Passageiro chega)
@@ -156,7 +71,7 @@ app.post('/api/meetups', async (req, res) => {
             `INSERT INTO MeetupSessions 
             (tracking_code, passenger_id, flight_status, terminal, arrival_gate, status) 
             VALUES (?, ?, ?, ?, ?, 'active')`,
-            [tracking_code, passenger_id, flight_status, terminal, arrival_gate]
+            [tracking_code, passenger_id, flight_status || 'Aterrissou', terminal || null, arrival_gate || null]
         );
 
         res.status(201).json({
@@ -166,7 +81,23 @@ app.post('/api/meetups', async (req, res) => {
             passenger_id
         });
     } catch (error) {
+        console.error("Erro no POST /api/meetups:", error);
         res.status(500).json({ error: 'Erro ao criar sessão' });
+    }
+});
+
+app.get('/api/meetups/:trackingCode', async (req, res) => {
+    const { trackingCode } = req.params;
+    try {
+        const [rows] = await pool.execute(
+            'SELECT * FROM MeetupSessions WHERE tracking_code = ? LIMIT 1',
+            [trackingCode]
+        );
+
+        if (rows.length === 0) return res.status(404).json({ error: 'Sessão não encontrada' });
+        res.json(rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar sessão' });
     }
 });
 
@@ -194,72 +125,86 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
             [seeker_id, session.id]
         );
 
-        res.json({ message: 'Conectado à sessão', seeker_id, passenger_id: session.passenger_id });
+        res.json({ message: 'Conectado com sucesso', seeker_id });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao entrar na sessão' });
     }
 });
 
-// Atualizar Status (Passageiro clica nos botões)
-app.patch('/api/meetups/:code/status', async (req, res) => {
-    const { code } = req.params;
-    const { flight_status } = req.body;
+app.patch('/api/meetups/:trackingCode/status', async (req, res) => {
+    const { trackingCode } = req.params;
+    const { flight_status, webhook_url } = req.body;
 
     try {
-        const [rows] = await pool.execute('SELECT id FROM MeetupSessions WHERE tracking_code = ?', [code]);
-        if (rows.length === 0) return res.status(404).json({ error: 'Sessão não encontrada.' });
+        const [rows] = await pool.execute('SELECT id FROM MeetupSessions WHERE tracking_code = ?', [trackingCode]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Sessão não encontrada' });
         
-        const session_id = rows[0].id;
+        const sessionId = rows[0].id;
 
-        await pool.execute(
-            'UPDATE MeetupSessions SET flight_status = ? WHERE id = ?',
-            [flight_status, session_id]
-        );
+        await pool.execute('UPDATE MeetupSessions SET flight_status = ? WHERE tracking_code = ?', [flight_status, trackingCode]);
+        
+        broadcastToSession(sessionId, 'status_update', { flight_status });
 
-        // Dispara evento em tempo real
-        broadcastToSession(session_id, 'status_update', { flight_status });
-
-        // GATILHO DE WHATSAPP:
-        if (flight_status === 'No Saguão' || flight_status === 'Desembarcando') {
-            const [seekerRows] = await pool.execute('SELECT u.phone FROM Users u JOIN MeetupSessions m ON m.seeker_id = u.id WHERE m.id = ?', [session_id]);
-            if (seekerRows.length > 0 && seekerRows[0].phone) {
-                sendWhatsAppAlert(seekerRows[0].phone, `⚠️ Alerta AeroMeet: O Passageiro do código [${code}] mudou o status para: ${flight_status}`);
-            }
+        if (webhook_url) {
+            fetch(webhook_url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ event: 'status_update', flight_status, tracking_code: trackingCode })
+            }).catch(console.error);
         }
 
-        res.json({ message: 'Status atualizado' });
+        res.json({ message: 'Status atualizado com sucesso' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao atualizar status' });
     }
 });
 
-// Receber localização do GPS
+// ==========================================
+// ROTAS PARA LOCATION PINGS E SSE
+// ==========================================
+
+app.get('/api/stream/:sessionId', (req, res) => {
+    const sessionId = parseInt(req.params.sessionId);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    if (!sseClients.has(sessionId)) {
+        sseClients.set(sessionId, new Set());
+    }
+    sseClients.get(sessionId).add(res);
+
+    req.on('close', () => {
+        const clients = sseClients.get(sessionId);
+        if (clients) {
+            clients.delete(res);
+            if (clients.size === 0) sseClients.delete(sessionId);
+        }
+    });
+});
+
 app.post('/api/pings', async (req, res) => {
     const { session_id, user_id, latitude, longitude } = req.body;
 
     try {
-        await pool.execute(
+        const [result] = await pool.execute(
             'INSERT INTO LocationPings (session_id, user_id, latitude, longitude) VALUES (?, ?, ?, ?)',
             [session_id, user_id, latitude, longitude]
         );
 
-        broadcastToSession(session_id, 'location_update', { user_id, latitude, longitude });
+        const pingData = { id: result.insertId, latitude, longitude, timestamp: new Date() };
+        broadcastToSession(session_id, 'location_update', pingData);
 
-        res.json({ success: true });
+        res.status(201).json({ success: true, ping_id: result.insertId });
     } catch (error) {
-        res.status(500).json({ error: 'Erro ao salvar ping' });
+        console.error("Erro no POST /api/pings:", error);
+        res.status(500).json({ error: 'Erro ao salvar localização' });
     }
 });
 
-app.get('/api/meetups/:code', async (req, res) => {
-    try {
-        const [rows] = await pool.execute('SELECT * FROM MeetupSessions WHERE tracking_code = ?', [req.params.code]);
-        if (rows.length === 0) return res.status(404).json({ error: 'Não encontrado' });
-        res.json(rows[0]);
-    } catch (error) {
-        res.status(500).json({ error: 'Erro interno' });
-    }
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Servidor rodando na porta ${PORT}`);
 });
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Servidor rodando na porta ${PORT}`));
