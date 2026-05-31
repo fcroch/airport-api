@@ -24,6 +24,75 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
+// ==========================================
+// WORKER DE INTEGRAÇÃO AVIATIONSTACK
+// ==========================================
+const AVIATION_API_KEY = process.env.AVIATION_STACK_API_KEY || '9e395861534dd56c511b44ff5c0d3587';
+const flightCache = new Map(); // Cache em memória
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+async function fetchFlightData(flightNumber) {
+    if (!flightNumber) return null;
+    
+    // Verifica Cache
+    const cached = flightCache.get(flightNumber);
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+        console.log(`[Flight Worker] Retornando cache para o voo ${flightNumber}`);
+        return cached.data;
+    }
+
+    try {
+        console.log(`[Flight Worker] Buscando voo ${flightNumber} na AviationStack...`);
+        const response = await fetch(`http://api.aviationstack.com/v1/flights?access_key=${AVIATION_API_KEY}&flight_iata=${flightNumber}`);
+        const data = await response.json();
+
+        if (data && data.data && data.data.length > 0) {
+            const flight = data.data[0];
+            const result = {
+                airline: flight.airline.name,
+                terminal: flight.arrival.terminal,
+                gate: flight.arrival.gate,
+                estimated_arrival: flight.arrival.estimated,
+                flight_status: flight.flight_status
+            };
+            
+            flightCache.set(flightNumber, { timestamp: Date.now(), data: result });
+            return result;
+        }
+        return null;
+    } catch (error) {
+        console.error('[Flight Worker] Erro na API:', error.message);
+        return null;
+    }
+}
+
+// Tarefa em Background que roda a cada 1 minuto
+setInterval(async () => {
+    try {
+        const [sessions] = await pool.execute("SELECT id, flight_number, tracking_code FROM MeetupSessions WHERE status = 'active' AND flight_number IS NOT NULL");
+        for (const session of sessions) {
+            const flightData = await fetchFlightData(session.flight_number);
+            if (flightData) {
+                // Atualiza o banco
+                await pool.execute(
+                    `UPDATE MeetupSessions SET airline=?, terminal=?, arrival_gate=?, estimated_arrival=?, flight_status=? WHERE id=?`,
+                    [flightData.airline, flightData.terminal, flightData.gate, flightData.estimated_arrival, flightData.flight_status, session.id]
+                );
+
+                // Dispara atualização pro FrontEnd (via SSE)
+                const clients = sseClients.get(session.id);
+                if (clients) {
+                    const message = `data: ${JSON.stringify({ type: 'flight_update', data: flightData })}\n\n`;
+                    clients.forEach(client => client.write(message));
+                }
+            }
+        }
+    } catch (err) {
+        console.error('[Flight Worker] Erro geral:', err.message);
+    }
+}, 60 * 1000);
+
+
 // Testador de Conexão Automático + Auto-Migração
 pool.getConnection()
     .then(conn => {
@@ -55,7 +124,7 @@ function broadcastToSession(sessionId, eventType, data) {
 
 // Criar nova sessão (Passageiro chega)
 app.post('/api/meetups', async (req, res) => {
-    let { passenger_id, flight_status, terminal, arrival_gate, phone } = req.body;
+    let { passenger_id, flight_status, terminal, arrival_gate, phone, flight_number } = req.body;
     const tracking_code = crypto.randomBytes(3).toString('hex').toUpperCase();
 
     try {
@@ -69,9 +138,9 @@ app.post('/api/meetups', async (req, res) => {
 
         const [result] = await pool.execute(
             `INSERT INTO MeetupSessions 
-            (tracking_code, passenger_id, flight_status, terminal, arrival_gate, status) 
-            VALUES (?, ?, ?, ?, ?, 'active')`,
-            [tracking_code, passenger_id, flight_status || 'Aterrissou', terminal || null, arrival_gate || null]
+            (tracking_code, passenger_id, flight_status, terminal, arrival_gate, status, flight_number) 
+            VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+            [tracking_code, passenger_id, flight_status || 'Aterrissou', terminal || null, arrival_gate || null, flight_number || null]
         );
 
         res.status(201).json({
@@ -125,7 +194,18 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
             [seeker_id, session.id]
         );
 
-        res.json({ message: 'Conectado com sucesso', seeker_id });
+        res.json({ 
+            message: 'Conectado com sucesso', 
+            seeker_id,
+            flight_data: session.flight_number ? {
+                flight_number: session.flight_number,
+                airline: session.airline,
+                terminal: session.terminal,
+                gate: session.arrival_gate,
+                estimated_arrival: session.estimated_arrival,
+                flight_status: session.flight_status
+            } : null
+        });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao entrar na sessão' });
     }
