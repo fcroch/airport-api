@@ -42,8 +42,10 @@ async function fetchFlightData(flightNumber) {
     }
 
     try {
-        console.log(`[Flight Worker] Buscando voo ${flightNumber} na AviationStack...`);
-        const response = await fetch(`http://api.aviationstack.com/v1/flights?access_key=${AVIATION_API_KEY}&flight_iata=${flightNumber}`);
+        // Limpa espaços, converte para maiúsculas e URL-encode
+        const sanitizedFlight = encodeURIComponent(flightNumber.replace(/\s+/g, '').toUpperCase());
+        console.log(`[Flight Worker] Buscando voo ${sanitizedFlight} na AviationStack...`);
+        const response = await fetch(`http://api.aviationstack.com/v1/flights?access_key=${AVIATION_API_KEY}&flight_iata=${sanitizedFlight}`);
         const data = await response.json();
 
         if (data && data.data && data.data.length > 0) {
