@@ -3,6 +3,7 @@ const mysql = require('mysql2/promise');
 const crypto = require('crypto');
 const cors = require('cors'); // Necessário para a arquitetura separada
 const rateLimit = require('express-rate-limit'); // Adicionado para segurança (Fase 1)
+const jwt = require('jsonwebtoken'); // Adicionado para segurança (Fase 2)
 
 const app = express();
 app.use(cors()); // Permite que o seu domínio topclassexecutive.com.br converse com a Render
@@ -37,10 +38,31 @@ const dbConfig = {
     database: process.env.DB_NAME || 'u809350891_topclassexec'
 };
 
+const JWT_SECRET = process.env.JWT_SECRET;
+
 if (!dbConfig.password) {
     console.error("FATAL ERROR: DB_PASSWORD não está definida no ambiente.");
     process.exit(1);
 }
+
+if (!JWT_SECRET) {
+    console.error("FATAL ERROR: JWT_SECRET não está definida no ambiente.");
+    process.exit(1);
+}
+
+// Middleware de validação JWT
+const verifyJWT = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Token ausente ou mal formatado' });
+    }
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) return res.status(403).json({ error: 'Token inválido ou expirado' });
+        req.user = decoded;
+        next();
+    });
+};
 
 const pool = mysql.createPool({
     ...dbConfig,
@@ -170,11 +192,15 @@ app.post('/api/meetups', async (req, res) => {
             [tracking_code, passenger_id, flight_status || 'Aterrissou', terminal || null, arrival_gate || null, flight_number || null]
         );
 
+        const sessionId = result.insertId;
+        const token = jwt.sign({ session_id: sessionId, user_id: passenger_id, role: 'passenger' }, JWT_SECRET, { expiresIn: '12h' });
+
         res.status(201).json({
             message: 'Sessão criada com sucesso',
-            session_id: result.insertId,
+            session_id: sessionId,
             tracking_code,
-            passenger_id
+            passenger_id,
+            token
         });
     } catch (error) {
         console.error("Erro no POST /api/meetups:", error);
@@ -221,9 +247,12 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
             [seeker_id, session.id]
         );
 
+        const token = jwt.sign({ session_id: session.id, user_id: seeker_id, role: 'seeker' }, JWT_SECRET, { expiresIn: '12h' });
+
         res.json({ 
             message: 'Conectado com sucesso', 
             seeker_id,
+            token,
             flight_data: session.flight_number ? {
                 flight_number: session.flight_number,
                 airline: session.airline,
@@ -238,7 +267,7 @@ app.patch('/api/meetups/:code/join', async (req, res) => {
     }
 });
 
-app.patch('/api/meetups/:trackingCode/status', async (req, res) => {
+app.patch('/api/meetups/:trackingCode/status', verifyJWT, async (req, res) => {
     const { trackingCode } = req.params;
     const { flight_status, webhook_url } = req.body;
 
@@ -292,7 +321,7 @@ app.get('/api/stream/:sessionId', (req, res) => {
     });
 });
 
-app.post('/api/pings', pingsLimiter, async (req, res) => {
+app.post('/api/pings', pingsLimiter, verifyJWT, async (req, res) => {
     const { session_id, user_id, latitude, longitude } = req.body;
 
     try {
