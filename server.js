@@ -2,20 +2,45 @@ const express = require('express');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
 const cors = require('cors'); // Necessário para a arquitetura separada
+const rateLimit = require('express-rate-limit'); // Adicionado para segurança (Fase 1)
 
 const app = express();
 app.use(cors()); // Permite que o seu domínio topclassexecutive.com.br converse com a Render
+
+// ==========================================
+// SECURITY: RATE LIMITING (Defesa contra scraping/DDoS)
+// ==========================================
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    max: 200, // Limita cada IP a 200 requisições por janela
+    message: { error: 'Muitas requisições deste IP, tente novamente mais tarde.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use(globalLimiter); // Aplica em todas as rotas
+
+const pingsLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minuto
+    max: 60, // Limita cada IP a 60 pings de localização por minuto
+    message: { error: 'Rate limit excedido para envio de localização.' }
+});
+
 app.use(express.json());
 
 // A pasta public não será mais servida pelo Node, pois o frontend estará direto na Hostinger.
 
 // Configuração do Banco de Dados
 const dbConfig = {
-    host: '82.112.247.235', // IP do seu servidor MySQL na Hostinger
-    user: 'u809350891_admin_user',
-    password: 'KNTjHWDwRckXxq6', // <-- Lembre-se de alterar para a senha real antes de subir!
-    database: 'u809350891_topclassexec'
+    host: process.env.DB_HOST || '82.112.247.235',
+    user: process.env.DB_USER || 'u809350891_admin_user',
+    password: process.env.DB_PASSWORD, // SECURE: Usar variável de ambiente no Render!
+    database: process.env.DB_NAME || 'u809350891_topclassexec'
 };
+
+if (!dbConfig.password) {
+    console.error("FATAL ERROR: DB_PASSWORD não está definida no ambiente.");
+    process.exit(1);
+}
 
 const pool = mysql.createPool({
     ...dbConfig,
@@ -267,7 +292,7 @@ app.get('/api/stream/:sessionId', (req, res) => {
     });
 });
 
-app.post('/api/pings', async (req, res) => {
+app.post('/api/pings', pingsLimiter, async (req, res) => {
     const { session_id, user_id, latitude, longitude } = req.body;
 
     try {
